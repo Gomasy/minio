@@ -91,10 +91,6 @@ func newErasureServerPools(ctx context.Context, endpointServerPools EndpointServ
 		n = 2048
 	}
 
-	if globalIsCICD {
-		n = 256 // 256MiB for CI/CD environments is sufficient
-	}
-
 	// Avoid allocating more than half of the available memory
 	if maxN := availableMemory() / (blockSizeV2 * 2); n > maxN {
 		n = maxN
@@ -103,7 +99,10 @@ func newErasureServerPools(ctx context.Context, endpointServerPools EndpointServ
 	// Initialize byte pool once for all sets, bpool size is set to
 	// setCount * setDriveCount with each memory upto blockSizeV2.
 	globalBytePoolCap = bpool.NewBytePoolCap(n, blockSizeV2, blockSizeV2*2)
-	globalBytePoolCap.Populate()
+
+	if globalServerCtxt.PreAllocate {
+		globalBytePoolCap.Populate()
+	}
 
 	var localDrives []StorageAPI
 	local := endpointServerPools.FirstLocal()
