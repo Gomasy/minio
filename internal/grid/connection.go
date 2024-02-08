@@ -30,7 +30,6 @@ import (
 	"net"
 	"net/http"
 	"runtime/debug"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -180,6 +179,7 @@ const (
 	writeBufferSize    = 16 << 10
 	defaultDialTimeout = 2 * time.Second
 	connPingInterval   = 10 * time.Second
+	connWriteTimeout   = 3 * time.Second
 )
 
 type connectionParams struct {
@@ -360,6 +360,7 @@ func (c *Subroute) Request(ctx context.Context, h HandlerID, req []byte) ([]byte
 		if debugReqs {
 			fmt.Println(client.MuxID, c.String(), "Subroute.Request: DELETING MUX")
 		}
+		client.cancelFn(context.Canceled)
 		c.outgoing.Delete(client.MuxID)
 	}()
 	return client.traceRoundtrip(ctx, c.trace, h, req)
@@ -601,6 +602,10 @@ func (c *Connection) sendMsg(conn net.Conn, msg message, payload msgp.MarshalSiz
 	if c.outgoingBytes != nil {
 		c.outgoingBytes(int64(len(dst)))
 	}
+	err = conn.SetWriteDeadline(time.Now().Add(connWriteTimeout))
+	if err != nil {
+		return err
+	}
 	return wsutil.WriteMessage(conn, c.side, ws.OpBinary, dst)
 }
 
@@ -661,8 +666,7 @@ func (c *Connection) connect() {
 			if gotState != StateConnecting {
 				// Don't print error on first attempt,
 				// and after that only once per hour.
-				cHour := strconv.FormatInt(time.Now().Unix()/60/60, 10)
-				logger.LogOnceIf(c.ctx, fmt.Errorf("grid: %s connecting to %s: %w (%T) Sleeping %v (%v)", c.Local, toDial, err, err, sleep, gotState), c.Local+toDial+cHour+err.Error())
+				logger.LogOnceIf(c.ctx, fmt.Errorf("grid: %s connecting to %s: %w (%T) Sleeping %v (%v)", c.Local, toDial, err, err, sleep, gotState), toDial)
 			}
 			c.updateState(StateConnectionError)
 			time.Sleep(sleep)
@@ -1106,6 +1110,11 @@ func (c *Connection) handleMessages(ctx context.Context, conn net.Conn) {
 				return
 			}
 			PutByteBuffer(toSend)
+			err = conn.SetWriteDeadline(time.Now().Add(connWriteTimeout))
+			if err != nil {
+				logger.LogIf(ctx, fmt.Errorf("conn.SetWriteDeadline: %w", err))
+				return
+			}
 			_, err = buf.WriteTo(conn)
 			if err != nil {
 				logger.LogIf(ctx, fmt.Errorf("ws write: %w", err))
@@ -1145,6 +1154,11 @@ func (c *Connection) handleMessages(ctx context.Context, conn net.Conn) {
 			return
 		}
 		// buf is our local buffer, so we can reuse it.
+		err = conn.SetWriteDeadline(time.Now().Add(connWriteTimeout))
+		if err != nil {
+			logger.LogIf(ctx, fmt.Errorf("conn.SetWriteDeadline: %w", err))
+			return
+		}
 		_, err = buf.WriteTo(conn)
 		if err != nil {
 			logger.LogIf(ctx, fmt.Errorf("ws write: %w", err))
