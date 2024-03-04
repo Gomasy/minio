@@ -441,12 +441,14 @@ type IAMStorageAPI interface {
 	runlock()
 	getUsersSysType() UsersSysType
 	loadPolicyDoc(ctx context.Context, policy string, m map[string]PolicyDoc) error
+	loadPolicyDocWithRetry(ctx context.Context, policy string, m map[string]PolicyDoc, retries int) error
 	loadPolicyDocs(ctx context.Context, m map[string]PolicyDoc) error
 	loadUser(ctx context.Context, user string, userType IAMUserType, m map[string]UserIdentity) error
 	loadUsers(ctx context.Context, userType IAMUserType, m map[string]UserIdentity) error
 	loadGroup(ctx context.Context, group string, m map[string]GroupInfo) error
 	loadGroups(ctx context.Context, m map[string]GroupInfo) error
 	loadMappedPolicy(ctx context.Context, name string, userType IAMUserType, isGroup bool, m map[string]MappedPolicy) error
+	loadMappedPolicyWithRetry(ctx context.Context, name string, userType IAMUserType, isGroup bool, m map[string]MappedPolicy, retries int) error
 	loadMappedPolicies(ctx context.Context, userType IAMUserType, isGroup bool, m map[string]MappedPolicy) error
 	saveIAMConfig(ctx context.Context, item interface{}, path string, opts ...options) error
 	loadIAMConfig(ctx context.Context, item interface{}, path string) error
@@ -1863,7 +1865,12 @@ func (store *IAMStoreSys) GetAllParentUsers() map[string]ParentUserInfo {
 		if cred.IsServiceAccount() {
 			claims, err = getClaimsFromTokenWithSecret(cred.SessionToken, cred.SecretKey)
 		} else if cred.IsTemp() {
-			claims, err = getClaimsFromTokenWithSecret(cred.SessionToken, globalActiveCred.SecretKey)
+			var secretKey string
+			secretKey, err = getTokenSigningKey()
+			if err != nil {
+				continue
+			}
+			claims, err = getClaimsFromTokenWithSecret(cred.SessionToken, secretKey)
 		}
 
 		if err != nil {
@@ -2477,22 +2484,24 @@ func (store *IAMStoreSys) LoadUser(ctx context.Context, accessKey string) {
 		store.loadUser(ctx, accessKey, regUser, cache.iamUsersMap)
 		if _, found = cache.iamUsersMap[accessKey]; found {
 			// load mapped policies
-			store.loadMappedPolicy(ctx, accessKey, regUser, false, cache.iamUserPolicyMap)
+			store.loadMappedPolicyWithRetry(ctx, accessKey, regUser, false, cache.iamUserPolicyMap, 3)
 		}
 	}
 
 	// Check for service account
 	if !found {
 		store.loadUser(ctx, accessKey, svcUser, cache.iamUsersMap)
-		if svc, found := cache.iamUsersMap[accessKey]; found {
+		var svc UserIdentity
+		svc, found = cache.iamUsersMap[accessKey]
+		if found {
 			// Load parent user and mapped policies.
 			if store.getUsersSysType() == MinIOUsersSysType {
 				store.loadUser(ctx, svc.Credentials.ParentUser, regUser, cache.iamUsersMap)
-				store.loadMappedPolicy(ctx, svc.Credentials.ParentUser, regUser, false, cache.iamUserPolicyMap)
+				store.loadMappedPolicyWithRetry(ctx, svc.Credentials.ParentUser, regUser, false, cache.iamUserPolicyMap, 3)
 			} else {
 				// In case of LDAP the parent user's policy mapping needs to be
 				// loaded into sts map
-				store.loadMappedPolicy(ctx, svc.Credentials.ParentUser, stsUser, false, cache.iamSTSPolicyMap)
+				store.loadMappedPolicyWithRetry(ctx, svc.Credentials.ParentUser, stsUser, false, cache.iamSTSPolicyMap, 3)
 			}
 		}
 	}
@@ -2504,7 +2513,7 @@ func (store *IAMStoreSys) LoadUser(ctx context.Context, accessKey string) {
 		store.loadUser(ctx, accessKey, stsUser, cache.iamSTSAccountsMap)
 		if stsUserCred, found = cache.iamSTSAccountsMap[accessKey]; found {
 			// Load mapped policy
-			store.loadMappedPolicy(ctx, stsUserCred.Credentials.ParentUser, stsUser, false, cache.iamSTSPolicyMap)
+			store.loadMappedPolicyWithRetry(ctx, stsUserCred.Credentials.ParentUser, stsUser, false, cache.iamSTSPolicyMap, 3)
 			stsAccountFound = true
 		}
 	}
@@ -2513,13 +2522,13 @@ func (store *IAMStoreSys) LoadUser(ctx context.Context, accessKey string) {
 	if !stsAccountFound {
 		for _, policy := range cache.iamUserPolicyMap[accessKey].toSlice() {
 			if _, found = cache.iamPolicyDocsMap[policy]; !found {
-				store.loadPolicyDoc(ctx, policy, cache.iamPolicyDocsMap)
+				store.loadPolicyDocWithRetry(ctx, policy, cache.iamPolicyDocsMap, 3)
 			}
 		}
 	} else {
 		for _, policy := range cache.iamSTSPolicyMap[stsUserCred.Credentials.AccessKey].toSlice() {
 			if _, found = cache.iamPolicyDocsMap[policy]; !found {
-				store.loadPolicyDoc(ctx, policy, cache.iamPolicyDocsMap)
+				store.loadPolicyDocWithRetry(ctx, policy, cache.iamPolicyDocsMap, 3)
 			}
 		}
 	}
@@ -2528,8 +2537,12 @@ func (store *IAMStoreSys) LoadUser(ctx context.Context, accessKey string) {
 func extractJWTClaims(u UserIdentity) (*jwt.MapClaims, error) {
 	jwtClaims, err := auth.ExtractClaims(u.Credentials.SessionToken, u.Credentials.SecretKey)
 	if err != nil {
-		// Session tokens for STS creds will be generated with root secret
-		jwtClaims, err = auth.ExtractClaims(u.Credentials.SessionToken, globalActiveCred.SecretKey)
+		secretKey, err := getTokenSigningKey()
+		if err != nil {
+			return nil, err
+		}
+		// Session tokens for STS creds will be generated with root secret or site-replicator-0 secret
+		jwtClaims, err = auth.ExtractClaims(u.Credentials.SessionToken, secretKey)
 		if err != nil {
 			return nil, err
 		}
