@@ -97,6 +97,10 @@ func newErasureServerPools(ctx context.Context, endpointServerPools EndpointServ
 		n = maxN
 	}
 
+	if globalIsCICD || strconv.IntSize == 32 {
+		n = 256 // 256MiB for CI/CD environments is sufficient or on 32bit platforms.
+	}
+
 	// Initialize byte pool once for all sets, bpool size is set to
 	// setCount * setDriveCount with each memory upto blockSizeV2.
 	globalBytePoolCap = bpool.NewBytePoolCap(n, blockSizeV2, blockSizeV2*2)
