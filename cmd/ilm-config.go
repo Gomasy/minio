@@ -1,6 +1,3 @@
-//go:build linux && !appengine
-// +build linux,!appengine
-
 // Copyright (c) 2015-2024 MinIO, Inc.
 //
 // This file is part of MinIO Object Storage stack
@@ -21,26 +18,40 @@
 package cmd
 
 import (
-	"syscall"
+	"sync"
+
+	"github.com/minio/minio/internal/config/ilm"
 )
 
-// Returns true if no error and there is no object or prefix inside this directory
-func isDirEmpty(dirname string) bool {
-	var stat syscall.Stat_t
-	if err := syscall.Stat(dirname, &stat); err != nil {
-		return false
-	}
-	if stat.Mode&syscall.S_IFMT == syscall.S_IFDIR && stat.Nlink == 2 {
-		return true
-	}
-	// On filesystems such as btrfs, nfs this is not true, so fallback
-	// to performing readdir() instead.
-	if stat.Mode&syscall.S_IFMT == syscall.S_IFDIR && stat.Nlink < 2 {
-		entries, err := readDirN(dirname, 1)
-		if err != nil {
-			return false
-		}
-		return len(entries) == 0
-	}
-	return false
+var globalILMConfig = ilmConfig{
+	cfg: ilm.Config{
+		ExpirationWorkers: 100,
+		TransitionWorkers: 100,
+	},
+}
+
+type ilmConfig struct {
+	mu  sync.RWMutex
+	cfg ilm.Config
+}
+
+func (c *ilmConfig) getExpirationWorkers() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.cfg.ExpirationWorkers
+}
+
+func (c *ilmConfig) getTransitionWorkers() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	return c.cfg.TransitionWorkers
+}
+
+func (c *ilmConfig) update(cfg ilm.Config) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.cfg = cfg
 }
