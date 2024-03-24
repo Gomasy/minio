@@ -72,9 +72,6 @@ func (pd *PoolDecommissionInfo) Clone() *PoolDecommissionInfo {
 	if pd == nil {
 		return nil
 	}
-	if pd.StartTime.IsZero() {
-		return nil
-	}
 	return &PoolDecommissionInfo{
 		StartTime:               pd.StartTime,
 		StartSize:               pd.StartSize,
@@ -97,7 +94,7 @@ func (pd *PoolDecommissionInfo) Clone() *PoolDecommissionInfo {
 
 // bucketPop should be called when a bucket is done decommissioning.
 // Adds the bucket to the list of decommissioned buckets and updates resume numbers.
-func (pd *PoolDecommissionInfo) bucketPop(bucket string) {
+func (pd *PoolDecommissionInfo) bucketPop(bucket string) bool {
 	pd.DecommissionedBuckets = append(pd.DecommissionedBuckets, bucket)
 	for i, b := range pd.QueuedBuckets {
 		if b == bucket {
@@ -109,9 +106,10 @@ func (pd *PoolDecommissionInfo) bucketPop(bucket string) {
 				pd.Prefix = "" // empty this out for the next bucket
 				pd.Object = "" // empty this out for next object
 			}
-			return
+			return true
 		}
 	}
+	return false
 }
 
 func (pd *PoolDecommissionInfo) isBucketDecommissioned(bucket string) bool {
@@ -222,12 +220,12 @@ func (p poolMeta) isBucketDecommissioned(idx int, bucket string) bool {
 	return p.Pools[idx].Decommission.isBucketDecommissioned(bucket)
 }
 
-func (p *poolMeta) BucketDone(idx int, bucket decomBucketInfo) {
+func (p *poolMeta) BucketDone(idx int, bucket decomBucketInfo) bool {
 	if p.Pools[idx].Decommission == nil {
 		// Decommission not in progress.
-		return
+		return false
 	}
-	p.Pools[idx].Decommission.bucketPop(bucket.String())
+	return p.Pools[idx].Decommission.bucketPop(bucket.String())
 }
 
 func (p poolMeta) ResumeBucketObject(idx int) (bucket, object string) {
@@ -1055,8 +1053,10 @@ func (z *erasureServerPools) decommissionInBackground(ctx context.Context, idx i
 			}
 
 			z.poolMetaMutex.Lock()
-			z.poolMeta.BucketDone(idx, bucket) // remove from pendingBuckets and persist.
-			z.poolMeta.save(ctx, z.serverPools)
+			if z.poolMeta.BucketDone(idx, bucket) {
+				// remove from pendingBuckets and persist.
+				logger.LogIf(ctx, z.poolMeta.save(ctx, z.serverPools))
+			}
 			z.poolMetaMutex.Unlock()
 			continue
 		}
@@ -1071,8 +1071,9 @@ func (z *erasureServerPools) decommissionInBackground(ctx context.Context, idx i
 		stopFn(nil)
 
 		z.poolMetaMutex.Lock()
-		z.poolMeta.BucketDone(idx, bucket)
-		z.poolMeta.save(ctx, z.serverPools)
+		if z.poolMeta.BucketDone(idx, bucket) {
+			logger.LogIf(ctx, z.poolMeta.save(ctx, z.serverPools))
+		}
 		z.poolMetaMutex.Unlock()
 	}
 	return nil

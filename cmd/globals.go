@@ -172,6 +172,7 @@ type serverCtxt struct {
 	ReadHeaderTimeout   time.Duration
 	MaxIdleConnsPerHost int
 
+	CrossDomainXML string
 	// The layout of disks as interpreted
 	Layout disksLayout
 }
