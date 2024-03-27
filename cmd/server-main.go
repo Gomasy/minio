@@ -147,9 +147,14 @@ var ServerFlags = []cli.Flag{
 	},
 	cli.DurationFlag{
 		Name:   "dns-cache-ttl",
-		Usage:  "custom DNS cache TTL for baremetal setups",
+		Usage:  "custom DNS cache TTL",
 		Hidden: true,
-		Value:  10 * time.Minute,
+		Value: func() time.Duration {
+			if orchestrated {
+				return 30 * time.Second
+			}
+			return 10 * time.Minute
+		}(),
 		EnvVar: "MINIO_DNS_CACHE_TTL",
 	},
 	cli.IntFlag{
@@ -599,12 +604,7 @@ func setGlobalInternodeInterface(interfaceName string) {
 				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 				defer cancel()
 
-				lookupHost := globalDNSCache.LookupHost
-				if IsKubernetes() || IsDocker() {
-					lookupHost = net.DefaultResolver.LookupHost
-				}
-
-				haddrs, err := lookupHost(ctx, host)
+				haddrs, err := globalDNSCache.LookupHost(ctx, host)
 				if err == nil {
 					ip = haddrs[0]
 				}
@@ -642,12 +642,7 @@ func getServerListenAddrs() []string {
 		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 		defer cancel()
 
-		lookupHost := globalDNSCache.LookupHost
-		if IsKubernetes() || IsDocker() {
-			lookupHost = net.DefaultResolver.LookupHost
-		}
-
-		haddrs, err := lookupHost(ctx, host)
+		haddrs, err := globalDNSCache.LookupHost(ctx, host)
 		if err == nil {
 			for _, addr := range haddrs {
 				addrs.Add(net.JoinHostPort(addr, globalMinioPort))
