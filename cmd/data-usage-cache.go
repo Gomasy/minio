@@ -191,6 +191,22 @@ type replicationAllStatsV1 struct {
 	ReplicaCount uint64 `msg:"ReplicaCount,omitempty"`
 }
 
+// empty returns true if the replicationAllStats is empty (contains no entries).
+func (r *replicationAllStats) empty() bool {
+	if r == nil {
+		return true
+	}
+	if r.ReplicaSize != 0 || r.ReplicaCount != 0 {
+		return false
+	}
+	for _, v := range r.Targets {
+		if !v.Empty() {
+			return false
+		}
+	}
+	return true
+}
+
 // clone creates a deep-copy clone.
 func (r *replicationAllStats) clone() *replicationAllStats {
 	if r == nil {
@@ -523,20 +539,18 @@ func (d *dataUsageCache) searchParent(h dataUsageHash) *dataUsageHash {
 	want := h.Key()
 	if idx := strings.LastIndexByte(want, '/'); idx >= 0 {
 		if v := d.find(want[:idx]); v != nil {
-			for child := range v.Children {
-				if child == want {
-					found := hashPath(want[:idx])
-					return &found
-				}
+			_, ok := v.Children[want]
+			if ok {
+				found := hashPath(want[:idx])
+				return &found
 			}
 		}
 	}
 	for k, v := range d.Cache {
-		for child := range v.Children {
-			if child == want {
-				found := dataUsageHash(k)
-				return &found
-			}
+		_, ok := v.Children[want]
+		if ok {
+			found := dataUsageHash(k)
+			return &found
 		}
 	}
 	return nil
@@ -901,6 +915,9 @@ func (d *dataUsageCache) sizeRecursive(path string) *dataUsageEntry {
 		return root
 	}
 	flat := d.flatten(*root)
+	if flat.ReplicationStats.empty() {
+		flat.ReplicationStats = nil
+	}
 	return &flat
 }
 

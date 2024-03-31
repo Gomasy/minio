@@ -2234,8 +2234,8 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 			return
 		}
 
-		if crypto.SSEC.IsRequested(r.Header) && isReplicationEnabled(ctx, bucket) {
-			writeErrorResponse(ctx, w, toAPIError(ctx, errInvalidEncryptionParametersSSEC), r.URL)
+		if crypto.SSEC.IsRequested(r.Header) && isCompressible(r.Header, object) {
+			writeErrorResponse(ctx, w, toAPIError(ctx, crypto.ErrIncompatibleEncryptionWithCompression), r.URL)
 			return
 		}
 
@@ -2649,10 +2649,6 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 				return errInvalidEncryptionParameters
 			}
 
-			if crypto.SSEC.IsRequested(r.Header) && isReplicationEnabled(ctx, bucket) {
-				return errInvalidEncryptionParametersSSEC
-			}
-
 			reader, objectEncryptionKey, err = EncryptRequest(hashReader, r, bucket, object, metadata)
 			if err != nil {
 				return err
@@ -2830,7 +2826,9 @@ func (api objectAPIHandlers) DeleteObjectHandler(w http.ResponseWriter, r *http.
 
 	rcfg, _ := globalBucketObjectLockSys.Get(bucket)
 	if rcfg.LockEnabled && opts.DeletePrefix {
-		writeErrorResponse(ctx, w, toAPIError(ctx, errors.New("force-delete is forbidden in a locked-enabled bucket")), r.URL)
+		apiErr := toAPIError(ctx, errInvalidArgument)
+		apiErr.Description = "force-delete is forbidden on Object Locking enabled buckets"
+		writeErrorResponse(ctx, w, apiErr, r.URL)
 		return
 	}
 

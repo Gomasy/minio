@@ -107,6 +107,12 @@ test-site-replication-oidc: install-race ## verify automatic site replication
 test-site-replication-minio: install-race ## verify automatic site replication
 	@echo "Running tests for automatic site replication of IAM (with MinIO IDP)"
 	@(env bash $(PWD)/docs/site-replication/run-multi-site-minio-idp.sh)
+	@echo "Running tests for automatic site replication of SSE-C objects"
+	@(env bash $(PWD)/docs/site-replication/run-ssec-object-replication.sh)
+	@echo "Running tests for automatic site replication of SSE-C objects with SSE-KMS enabled for bucket"
+	@(env bash $(PWD)/docs/site-replication/run-sse-kms-object-replication.sh)
+	@echo "Running tests for automatic site replication of SSE-C objects with compression enabled for site"
+	@(env bash $(PWD)/docs/site-replication/run-ssec-object-replication-with-compression.sh)
 
 verify: ## verify minio various setups
 	@echo "Verifying build with race"
@@ -147,9 +153,9 @@ hotfix-vars:
 	$(eval VERSION := $(shell git describe --tags --abbrev=0).hotfix.$(shell git rev-parse --short HEAD))
 
 hotfix: hotfix-vars clean install ## builds minio binary with hotfix tags
-	@wget -q -c https://github.com/minio/pkger/releases/download/v2.2.1/pkger_2.2.1_linux_amd64.deb
+	@wget -q -c https://github.com/minio/pkger/releases/download/v2.2.9/pkger_2.2.9_linux_amd64.deb
 	@wget -q -c https://raw.githubusercontent.com/minio/minio-service/v1.0.1/linux-systemd/distributed/minio.service
-	@sudo apt install ./pkger_2.2.1_linux_amd64.deb --yes
+	@sudo apt install ./pkger_2.2.9_linux_amd64.deb --yes
 	@mkdir -p minio-release/$(GOOS)-$(GOARCH)/archive
 	@cp -af ./minio minio-release/$(GOOS)-$(GOARCH)/minio
 	@cp -af ./minio minio-release/$(GOOS)-$(GOARCH)/minio.$(VERSION)
