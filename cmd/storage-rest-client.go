@@ -38,7 +38,6 @@ import (
 	"github.com/minio/minio/internal/grid"
 	xhttp "github.com/minio/minio/internal/http"
 	xioutil "github.com/minio/minio/internal/ioutil"
-	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/rest"
 	xnet "github.com/minio/pkg/v2/net"
 	xbufio "github.com/philhofer/fwd"
@@ -468,7 +467,7 @@ func (client *storageRESTClient) CheckParts(ctx context.Context, volume string, 
 
 // RenameData - rename source path to destination path atomically, metadata and data file.
 func (client *storageRESTClient) RenameData(ctx context.Context, srcVolume, srcPath string, fi FileInfo, dstVolume, dstPath string, opts RenameOptions) (sign uint64, err error) {
-	resp, err := storageRenameDataRPC.Call(ctx, client.gridConn, &RenameDataHandlerParams{
+	params := RenameDataHandlerParams{
 		DiskID:    client.diskID,
 		SrcVolume: srcVolume,
 		SrcPath:   srcPath,
@@ -476,10 +475,17 @@ func (client *storageRESTClient) RenameData(ctx context.Context, srcVolume, srcP
 		DstVolume: dstVolume,
 		FI:        fi,
 		Opts:      opts,
-	})
+	}
+	var resp *RenameDataResp
+	if fi.Data == nil {
+		resp, err = storageRenameDataRPC.Call(ctx, client.gridConn, &params)
+	} else {
+		resp, err = storageRenameDataInlineRPC.Call(ctx, client.gridConn, &RenameDataInlineHandlerParams{params})
+	}
 	if err != nil {
 		return 0, toStorageErr(err)
 	}
+
 	defer storageRenameDataRPC.PutResponse(resp)
 	return resp.Signature, nil
 }
@@ -688,7 +694,7 @@ func (client *storageRESTClient) DeleteVersions(ctx context.Context, volume stri
 	for _, version := range versions {
 		version.EncodeMsg(encoder)
 	}
-	logger.LogIf(ctx, encoder.Flush())
+	storageLogIf(ctx, encoder.Flush())
 
 	errs = make([]error, len(versions))
 

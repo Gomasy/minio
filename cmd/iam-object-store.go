@@ -34,7 +34,6 @@ import (
 	"github.com/minio/minio/internal/config"
 	xioutil "github.com/minio/minio/internal/ioutil"
 	"github.com/minio/minio/internal/kms"
-	"github.com/minio/minio/internal/logger"
 	"github.com/puzpuzpuz/xsync/v3"
 )
 
@@ -400,6 +399,7 @@ var (
 	groupsListKey           = "groups/"
 	policiesListKey         = "policies/"
 	stsListKey              = "sts/"
+	policyDBPrefix          = "policydb/"
 	policyDBUsersListKey    = "policydb/users/"
 	policyDBSTSUsersListKey = "policydb/sts-users/"
 	policyDBGroupsListKey   = "policydb/groups/"
@@ -407,8 +407,13 @@ var (
 
 // splitPath splits a path into a top-level directory and a child item. The
 // parent directory retains the trailing slash.
-func splitPath(s string) (string, string) {
-	i := strings.Index(s, "/")
+func splitPath(s string, lastIndex bool) (string, string) {
+	var i int
+	if lastIndex {
+		i = strings.LastIndex(s, "/")
+	} else {
+		i = strings.Index(s, "/")
+	}
 	if i == -1 {
 		return s, ""
 	}
@@ -425,7 +430,8 @@ func (iamOS *IAMObjectStore) listAllIAMConfigItems(ctx context.Context) (map[str
 			return nil, item.Err
 		}
 
-		listKey, trimmedItem := splitPath(item.Item)
+		lastIndex := strings.HasPrefix(item.Item, policyDBPrefix)
+		listKey, trimmedItem := splitPath(item.Item, lastIndex)
 		if listKey == iamFormatFile {
 			continue
 		}
@@ -448,7 +454,7 @@ func (iamOS *IAMObjectStore) PurgeExpiredSTS(ctx context.Context) error {
 	iamListing, ok := iamOS.cachedIAMListing.Load().(map[string][]string)
 	if !ok {
 		// There has been no store yet. This should never happen!
-		logger.LogIf(GlobalContext, errors.New("WARNING: no cached IAM listing found"))
+		iamLogIf(GlobalContext, errors.New("WARNING: no cached IAM listing found"))
 		return nil
 	}
 
@@ -461,7 +467,7 @@ func (iamOS *IAMObjectStore) PurgeExpiredSTS(ctx context.Context) error {
 		// loadUser() will delete expired user during the load.
 		err := iamOS.loadUser(ctx, userName, stsUser, stsAccountsFromStore)
 		if err != nil && !errors.Is(err, errNoSuchUser) {
-			logger.LogIf(GlobalContext,
+			iamLogIf(GlobalContext,
 				fmt.Errorf("unable to load user during STS purge: %w (%s)", err, item))
 		}
 
@@ -472,7 +478,7 @@ func (iamOS *IAMObjectStore) PurgeExpiredSTS(ctx context.Context) error {
 		stsName := strings.TrimSuffix(item, ".json")
 		err := iamOS.loadMappedPolicy(ctx, stsName, stsUser, false, stsAccPoliciesFromStore)
 		if err != nil && !errors.Is(err, errNoSuchPolicy) {
-			logger.LogIf(GlobalContext,
+			iamLogIf(GlobalContext,
 				fmt.Errorf("unable to load policies during STS purge: %w (%s)", err, item))
 		}
 

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/minio/madmin-go/v3"
+	"github.com/minio/minio/internal/grid"
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/pkg/v2/sync/errgroup"
 )
@@ -449,7 +450,7 @@ func (er *erasureObjects) healObject(ctx context.Context, bucket string, object 
 	if !latestMeta.Deleted && len(latestMeta.Erasure.Distribution) != len(availableDisks) {
 		err := fmt.Errorf("unexpected file distribution (%v) from available disks (%v), looks like backend disks have been manually modified refusing to heal %s/%s(%s)",
 			latestMeta.Erasure.Distribution, availableDisks, bucket, object, versionID)
-		logger.LogOnceIf(ctx, err, "heal-object-available-disks")
+		healingLogOnceIf(ctx, err, "heal-object-available-disks")
 		return er.defaultHealResult(latestMeta, storageDisks, storageEndpoints, errs,
 			bucket, object, versionID), err
 	}
@@ -459,7 +460,7 @@ func (er *erasureObjects) healObject(ctx context.Context, bucket string, object 
 	if !latestMeta.Deleted && len(latestMeta.Erasure.Distribution) != len(outDatedDisks) {
 		err := fmt.Errorf("unexpected file distribution (%v) from outdated disks (%v), looks like backend disks have been manually modified refusing to heal %s/%s(%s)",
 			latestMeta.Erasure.Distribution, outDatedDisks, bucket, object, versionID)
-		logger.LogOnceIf(ctx, err, "heal-object-outdated-disks")
+		healingLogOnceIf(ctx, err, "heal-object-outdated-disks")
 		return er.defaultHealResult(latestMeta, storageDisks, storageEndpoints, errs,
 			bucket, object, versionID), err
 	}
@@ -469,7 +470,7 @@ func (er *erasureObjects) healObject(ctx context.Context, bucket string, object 
 	if !latestMeta.Deleted && len(latestMeta.Erasure.Distribution) != len(partsMetadata) {
 		err := fmt.Errorf("unexpected file distribution (%v) from metadata entries (%v), looks like backend disks have been manually modified refusing to heal %s/%s(%s)",
 			latestMeta.Erasure.Distribution, len(partsMetadata), bucket, object, versionID)
-		logger.LogOnceIf(ctx, err, "heal-object-metadata-entries")
+		healingLogOnceIf(ctx, err, "heal-object-metadata-entries")
 		return er.defaultHealResult(latestMeta, storageDisks, storageEndpoints, errs,
 			bucket, object, versionID), err
 	}
@@ -539,7 +540,10 @@ func (er *erasureObjects) healObject(ctx context.Context, bucket string, object 
 				}
 				partPath := pathJoin(tmpID, dstDataDir, fmt.Sprintf("part.%d", partNumber))
 				if len(inlineBuffers) > 0 {
-					inlineBuffers[i] = bytes.NewBuffer(make([]byte, 0, erasure.ShardFileSize(latestMeta.Size)+32))
+					buf := grid.GetByteBufferCap(int(erasure.ShardFileSize(latestMeta.Size)) + 64)
+					inlineBuffers[i] = bytes.NewBuffer(buf[:0])
+					defer grid.PutByteBuffer(buf)
+
 					writers[i] = newStreamingBitrotWriterBuffer(inlineBuffers[i], DefaultBitrotAlgorithm, erasure.ShardSize())
 				} else {
 					writers[i] = newBitrotWriter(disk, bucket, minioMetaTmpBucket, partPath,
