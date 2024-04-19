@@ -152,6 +152,15 @@ func (f *FileInfoVersions) findVersionIndex(v string) int {
 	if f == nil || v == "" {
 		return -1
 	}
+	if v == nullVersionID {
+		for i, ver := range f.Versions {
+			if ver.VersionID == "" {
+				return i
+			}
+		}
+		return -1
+	}
+
 	for i, ver := range f.Versions {
 		if ver.VersionID == v {
 			return i
@@ -450,7 +459,7 @@ func (r *RenameDataInlineHandlerParams) Recycle() {
 	if r == nil {
 		return
 	}
-	if cap(r.FI.Data) >= xioutil.BlockSizeSmall {
+	if cap(r.FI.Data) >= xioutil.SmallBlock {
 		grid.PutByteBuffer(r.FI.Data)
 		r.FI.Data = nil
 	}

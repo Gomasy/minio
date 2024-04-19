@@ -595,6 +595,8 @@ func (s *storageRESTServer) ReadFileStreamHandler(w http.ResponseWriter, r *http
 		// Windows can lock up with this optimization, so we fall back to regular copy.
 		sr, ok := rc.(*sendFileReader)
 		if ok {
+			// Sendfile sends in 4MiB chunks per sendfile syscall which is more than enough
+			// for most setups.
 			_, err = rf.ReadFrom(sr.Reader)
 			if !xnet.IsNetworkOrHostDown(err, true) { // do not need to log disconnected clients
 				storageLogIf(r.Context(), err)
@@ -1194,6 +1196,10 @@ func logFatalErrs(err error, endpoint Endpoint, exit bool) {
 		if !exit {
 			storageLogOnceIf(GlobalContext, fmt.Errorf("Drive is already full at %s, incoming I/O will fail - drive will be offline", endpoint), "log-fatal-errs")
 		} else {
+			logger.Fatal(err, "Unable to initialize backend")
+		}
+	case errors.Is(err, errInconsistentDisk):
+		if exit {
 			logger.Fatal(err, "Unable to initialize backend")
 		}
 	default:

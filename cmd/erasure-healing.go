@@ -53,6 +53,10 @@ func (er erasureObjects) listAndHeal(bucket, prefix string, scanMode madmin.Heal
 		return errors.New("listAndHeal: No non-healing drives found")
 	}
 
+	expectedDisks := len(disks)/2 + 1
+	fallbackDisks := disks[expectedDisks:]
+	disks = disks[:expectedDisks]
+
 	// How to resolve partial results.
 	resolver := metadataResolutionParams{
 		dirQuorum: 1,
@@ -69,6 +73,7 @@ func (er erasureObjects) listAndHeal(bucket, prefix string, scanMode madmin.Heal
 
 	lopts := listPathRawOptions{
 		disks:          disks,
+		fallbackDisks:  fallbackDisks,
 		bucket:         bucket,
 		path:           path,
 		filterPrefix:   filterPrefix,
@@ -211,7 +216,7 @@ func (fi FileInfo) DataMov() bool {
 	return ok
 }
 
-func auditHealObject(ctx context.Context, bucket, object, versionID string, err error) {
+func auditHealObject(ctx context.Context, bucket, object, versionID string, result madmin.HealResultItem, err error) {
 	if len(logger.AuditTargets()) == 0 {
 		return
 	}
@@ -226,6 +231,10 @@ func auditHealObject(ctx context.Context, bucket, object, versionID string, err 
 		opts.Error = err.Error()
 	}
 
+	if result.After.Drives != nil {
+		opts.Tags = map[string]interface{}{"drives-result": result.After.Drives}
+	}
+
 	auditLogInternal(ctx, opts)
 }
 
@@ -237,7 +246,9 @@ func (er *erasureObjects) healObject(ctx context.Context, bucket string, object 
 	storageDisks := er.getDisks()
 	storageEndpoints := er.getEndpoints()
 
-	defer auditHealObject(ctx, bucket, object, versionID, err)
+	defer func() {
+		auditHealObject(ctx, bucket, object, versionID, result, err)
+	}()
 
 	if globalTrace.NumSubscribers(madmin.TraceHealing) > 0 {
 		startTime := time.Now()
@@ -360,21 +371,6 @@ func (er *erasureObjects) healObject(ctx context.Context, bucket string, object 
 			driveState = madmin.DriveStateCorrupt
 		}
 
-		if shouldHealObjectOnDisk(errs[i], dataErrs[i], partsMetadata[i], latestMeta) {
-			outDatedDisks[i] = storageDisks[i]
-			disksToHealCount++
-			result.Before.Drives = append(result.Before.Drives, madmin.HealDriveInfo{
-				UUID:     "",
-				Endpoint: storageEndpoints[i].String(),
-				State:    driveState,
-			})
-			result.After.Drives = append(result.After.Drives, madmin.HealDriveInfo{
-				UUID:     "",
-				Endpoint: storageEndpoints[i].String(),
-				State:    driveState,
-			})
-			continue
-		}
 		result.Before.Drives = append(result.Before.Drives, madmin.HealDriveInfo{
 			UUID:     "",
 			Endpoint: storageEndpoints[i].String(),
@@ -385,6 +381,12 @@ func (er *erasureObjects) healObject(ctx context.Context, bucket string, object 
 			Endpoint: storageEndpoints[i].String(),
 			State:    driveState,
 		})
+
+		if shouldHealObjectOnDisk(errs[i], dataErrs[i], partsMetadata[i], latestMeta) {
+			outDatedDisks[i] = storageDisks[i]
+			disksToHealCount++
+			continue
+		}
 	}
 
 	if isAllNotFound(errs) {

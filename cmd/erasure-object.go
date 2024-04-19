@@ -147,11 +147,12 @@ func (er erasureObjects) CopyObject(ctx context.Context, srcBucket, srcObject, d
 		modTime = dstOpts.MTime
 		fi.ModTime = dstOpts.MTime
 	}
+	// check inline before overwriting metadata.
+	inlineData := fi.InlineData()
 
 	fi.Metadata = srcInfo.UserDefined
 	srcInfo.UserDefined["etag"] = srcInfo.ETag
 
-	inlineData := fi.InlineData()
 	freeVersionID := fi.TierFreeVersionID()
 	freeVersionMarker := fi.TierFreeVersion()
 
@@ -2269,7 +2270,7 @@ func (er erasureObjects) GetObjectTags(ctx context.Context, bucket, object strin
 
 // TransitionObject - transition object content to target tier.
 func (er erasureObjects) TransitionObject(ctx context.Context, bucket, object string, opts ObjectOptions) error {
-	tgtClient, err := globalTierConfigMgr.getDriver(opts.Transition.Tier)
+	tgtClient, err := globalTierConfigMgr.getDriver(ctx, opts.Transition.Tier)
 	if err != nil {
 		return err
 	}

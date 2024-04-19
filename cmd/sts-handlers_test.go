@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/klauspost/compress/zip"
 	"github.com/minio/madmin-go/v3"
 	minio "github.com/minio/minio-go/v7"
 	cr "github.com/minio/minio-go/v7/pkg/credentials"
@@ -799,6 +800,128 @@ func TestIAMExportImportWithLDAP(t *testing.T) {
 	}
 }
 
+func TestIAMImportAssetWithLDAP(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), testDefaultTimeout)
+	defer cancel()
+
+	exportContentStrings := map[string]string{
+		allPoliciesFile: `{"consoleAdmin":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["admin:*"]},{"Effect":"Allow","Action":["kms:*"]},{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::*"]}]},"diagnostics":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["admin:Prometheus","admin:Profiling","admin:ServerTrace","admin:ConsoleLog","admin:ServerInfo","admin:TopLocksInfo","admin:OBDInfo","admin:BandwidthMonitor"],"Resource":["arn:aws:s3:::*"]}]},"readonly":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:GetBucketLocation","s3:GetObject"],"Resource":["arn:aws:s3:::*"]}]},"readwrite":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:*"],"Resource":["arn:aws:s3:::*"]}]},"writeonly":{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":["s3:PutObject"],"Resource":["arn:aws:s3:::*"]}]}}`,
+		allUsersFile:    `{}`,
+		allGroupsFile:   `{}`,
+		allSvcAcctsFile: `{
+    "u4ccRswj62HV3Ifwima7": {
+        "parent": "uid=svc.algorithm,OU=swengg,DC=min,DC=io",
+        "accessKey": "u4ccRswj62HV3Ifwima7",
+        "secretKey": "ZoEoZdLlzVbOlT9rbhD7ZN7TLyiYXSAlB79uGEge",
+        "groups": ["cn=project.c,ou=groups,OU=swengg,DC=min,DC=io"],
+        "claims": {
+            "accessKey": "u4ccRswj62HV3Ifwima7",
+            "ldapUser": "uid=svc.algorithm,ou=swengg,dc=min,dc=io",
+            "ldapUsername": "svc.algorithm",
+            "parent": "uid=svc.algorithm,ou=swengg,dc=min,dc=io",
+            "sa-policy": "inherited-policy"
+        },
+        "sessionPolicy": null,
+        "status": "on",
+        "name": "",
+        "description": ""
+    }
+}
+`,
+		userPolicyMappingsFile: `{}`,
+		// Contains duplicate mapping with same policy, we should not error out.
+		groupPolicyMappingsFile: `{
+    "cn=project.c,ou=groups,ou=swengg,DC=min,dc=io": {
+        "version": 0,
+        "policy": "consoleAdmin",
+        "updatedAt": "2024-04-17T23:54:28.442998301Z"
+    },
+    "cn=project.c,ou=groups,OU=swengg,DC=min,DC=io": {
+        "version": 0,
+        "policy": "consoleAdmin",
+        "updatedAt": "2024-04-17T20:54:28.442998301Z"
+    }
+}
+`,
+		stsUserPolicyMappingsFile: `{
+    "uid=dillon,ou=people,OU=swengg,DC=min,DC=io": {
+        "version": 0,
+        "policy": "consoleAdmin",
+        "updatedAt": "2024-04-17T23:54:10.606645642Z"
+    }
+}
+`,
+	}
+	exportContent := map[string][]byte{}
+	for k, v := range exportContentStrings {
+		exportContent[k] = []byte(v)
+	}
+
+	var importContent []byte
+	{
+		var b bytes.Buffer
+		zipWriter := zip.NewWriter(&b)
+		rawDataFn := func(r io.Reader, filename string, sz int) error {
+			header, zerr := zip.FileInfoHeader(dummyFileInfo{
+				name:    filename,
+				size:    int64(sz),
+				mode:    0o600,
+				modTime: time.Now(),
+				isDir:   false,
+				sys:     nil,
+			})
+			if zerr != nil {
+				adminLogIf(ctx, zerr)
+				return nil
+			}
+			header.Method = zip.Deflate
+			zwriter, zerr := zipWriter.CreateHeader(header)
+			if zerr != nil {
+				adminLogIf(ctx, zerr)
+				return nil
+			}
+			if _, err := io.Copy(zwriter, r); err != nil {
+				adminLogIf(ctx, err)
+			}
+			return nil
+		}
+		for _, f := range iamExportFiles {
+			iamFile := pathJoin(iamAssetsDir, f)
+
+			fileContent, ok := exportContent[f]
+			if !ok {
+				t.Fatalf("missing content for %s", f)
+			}
+
+			if err := rawDataFn(bytes.NewReader(fileContent), iamFile, len(fileContent)); err != nil {
+				t.Fatalf("failed to write %s: %v", iamFile, err)
+			}
+		}
+		zipWriter.Close()
+		importContent = b.Bytes()
+	}
+
+	for i, testCase := range iamTestSuites {
+		t.Run(
+			fmt.Sprintf("Test: %d, ServerType: %s", i+1, testCase.ServerTypeDescription),
+			func(t *testing.T) {
+				c := &check{t, testCase.serverType}
+				suite := testCase
+
+				ldapServer := os.Getenv(EnvTestLDAPServer)
+				if ldapServer == "" {
+					c.Skipf("Skipping LDAP test as no LDAP server is provided via %s", EnvTestLDAPServer)
+				}
+
+				suite.SetUpSuite(c)
+				suite.SetUpLDAP(c, ldapServer)
+				suite.TestIAMImportAssetContent(c, importContent)
+				suite.TearDownSuite(c)
+			},
+		)
+	}
+}
+
 type iamTestContent struct {
 	policies                map[string][]byte
 	ldapUserPolicyMappings  map[string][]string
@@ -855,6 +978,65 @@ type dummyCloser struct {
 }
 
 func (d dummyCloser) Close() error { return nil }
+
+func (s *TestSuiteIAM) TestIAMImportAssetContent(c *check, content []byte) {
+	ctx, cancel := context.WithTimeout(context.Background(), testDefaultTimeout)
+	defer cancel()
+
+	dummyCloser := dummyCloser{bytes.NewReader(content)}
+	err := s.adm.ImportIAM(ctx, dummyCloser)
+	if err != nil {
+		c.Fatalf("Unable to import IAM: %v", err)
+	}
+
+	entRes, err := s.adm.GetLDAPPolicyEntities(ctx, madmin.PolicyEntitiesQuery{})
+	if err != nil {
+		c.Fatalf("Unable to get policy entities: %v", err)
+	}
+
+	expected := madmin.PolicyEntitiesResult{
+		PolicyMappings: []madmin.PolicyEntities{
+			{
+				Policy: "consoleAdmin",
+				Users:  []string{"uid=dillon,ou=people,ou=swengg,dc=min,dc=io"},
+				Groups: []string{"cn=project.c,ou=groups,ou=swengg,dc=min,dc=io"},
+			},
+		},
+	}
+
+	entRes.Timestamp = time.Time{}
+	if !reflect.DeepEqual(expected, entRes) {
+		c.Fatalf("policy entities mismatch: expected: %v, got: %v", expected, entRes)
+	}
+
+	dn := "uid=svc.algorithm,ou=swengg,dc=min,dc=io"
+	res, err := s.adm.ListAccessKeysLDAP(ctx, dn, "")
+	if err != nil {
+		c.Fatalf("Unable to list access keys: %v", err)
+	}
+
+	epochTime := time.Unix(0, 0).UTC()
+	expectedAccKeys := madmin.ListAccessKeysLDAPResp{
+		ServiceAccounts: []madmin.ServiceAccountInfo{
+			{
+				AccessKey:  "u4ccRswj62HV3Ifwima7",
+				Expiration: &epochTime,
+			},
+		},
+	}
+
+	if !reflect.DeepEqual(expectedAccKeys, res) {
+		c.Fatalf("access keys mismatch: expected: %v, got: %v", expectedAccKeys, res)
+	}
+
+	accKeyInfo, err := s.adm.InfoServiceAccount(ctx, "u4ccRswj62HV3Ifwima7")
+	if err != nil {
+		c.Fatalf("Unable to get service account info: %v", err)
+	}
+	if accKeyInfo.ParentUser != "uid=svc.algorithm,ou=swengg,dc=min,dc=io" {
+		c.Fatalf("parent mismatch: expected: %s, got: %s", "uid=svc.algorithm,ou=swengg,dc=min,dc=io", accKeyInfo.ParentUser)
+	}
+}
 
 func (s *TestSuiteIAM) TestIAMImport(c *check, exportedContent []byte, caseNum int, content iamTestContent) {
 	ctx, cancel := context.WithTimeout(context.Background(), testDefaultTimeout)
@@ -1035,6 +1217,158 @@ func (s *TestSuiteIAM) TestLDAPSTS(c *check) {
 	value, err = ldapID.Retrieve()
 	if err != nil {
 		c.Fatalf("Expected to generate STS creds, got err: %#v", err)
+	}
+
+	minioClient, err = minio.New(s.endpoint, &minio.Options{
+		Creds:     cr.NewStaticV4(value.AccessKeyID, value.SecretAccessKey, value.SessionToken),
+		Secure:    s.secure,
+		Transport: s.TestSuiteCommon.client.Transport,
+	})
+	if err != nil {
+		c.Fatalf("Error initializing client: %v", err)
+	}
+
+	// Validate that the client from sts creds can access the bucket.
+	c.mustListObjects(ctx, minioClient, bucket)
+
+	// Validate that the client cannot remove any objects
+	err = minioClient.RemoveObject(ctx, bucket, "someobject", minio.RemoveObjectOptions{})
+	c.Assert(err.Error(), "Access Denied.")
+}
+
+func (s *TestSuiteIAM) TestLDAPUnicodeVariationsLegacyAPI(c *check) {
+	ctx, cancel := context.WithTimeout(context.Background(), testDefaultTimeout)
+	defer cancel()
+
+	bucket := getRandomBucketName()
+	err := s.client.MakeBucket(ctx, bucket, minio.MakeBucketOptions{})
+	if err != nil {
+		c.Fatalf("bucket create error: %v", err)
+	}
+
+	// Create policy
+	policy := "mypolicy"
+	policyBytes := []byte(fmt.Sprintf(`{
+ "Version": "2012-10-17",
+ "Statement": [
+  {
+   "Effect": "Allow",
+   "Action": [
+    "s3:PutObject",
+    "s3:GetObject",
+    "s3:ListBucket"
+   ],
+   "Resource": [
+    "arn:aws:s3:::%s/*"
+   ]
+  }
+ ]
+}`, bucket))
+	err = s.adm.AddCannedPolicy(ctx, policy, policyBytes)
+	if err != nil {
+		c.Fatalf("policy add error: %v", err)
+	}
+
+	ldapID := cr.LDAPIdentity{
+		Client:       s.TestSuiteCommon.client,
+		STSEndpoint:  s.endPoint,
+		LDAPUsername: "svc.algorithm",
+		LDAPPassword: "example",
+	}
+
+	_, err = ldapID.Retrieve()
+	if err == nil {
+		c.Fatalf("Expected to fail to create STS cred with no associated policy!")
+	}
+
+	mustNormalizeDN := func(dn string) string {
+		normalizedDN, err := ldap.NormalizeDN(dn)
+		if err != nil {
+			c.Fatalf("normalize err: %v", err)
+		}
+		return normalizedDN
+	}
+
+	actualUserDN := mustNormalizeDN("uid=svc.algorithm,OU=swengg,DC=min,DC=io")
+
+	// \uFE52 is the unicode dot SMALL FULL STOP used below:
+	userDNWithUnicodeDot := "uid=svc﹒algorithm,OU=swengg,DC=min,DC=io"
+
+	if err = s.adm.SetPolicy(ctx, policy, userDNWithUnicodeDot, false); err != nil {
+		c.Fatalf("Unable to set policy: %v", err)
+	}
+
+	value, err := ldapID.Retrieve()
+	if err != nil {
+		c.Fatalf("Expected to generate STS creds, got err: %#v", err)
+	}
+
+	usersList, err := s.adm.ListUsers(ctx)
+	if err != nil {
+		c.Fatalf("list users should not fail: %v", err)
+	}
+	if len(usersList) != 1 {
+		c.Fatalf("expected user listing output: %#v", usersList)
+	}
+	uinfo := usersList[actualUserDN]
+	if uinfo.PolicyName != policy || uinfo.Status != madmin.AccountEnabled {
+		c.Fatalf("expected user listing content: %v", uinfo)
+	}
+
+	minioClient, err := minio.New(s.endpoint, &minio.Options{
+		Creds:     cr.NewStaticV4(value.AccessKeyID, value.SecretAccessKey, value.SessionToken),
+		Secure:    s.secure,
+		Transport: s.TestSuiteCommon.client.Transport,
+	})
+	if err != nil {
+		c.Fatalf("Error initializing client: %v", err)
+	}
+
+	// Validate that the client from sts creds can access the bucket.
+	c.mustListObjects(ctx, minioClient, bucket)
+
+	// Validate that the client cannot remove any objects
+	err = minioClient.RemoveObject(ctx, bucket, "someobject", minio.RemoveObjectOptions{})
+	if err.Error() != "Access Denied." {
+		c.Fatalf("unexpected non-access-denied err: %v", err)
+	}
+
+	// Remove the policy assignment on the user DN:
+	if err = s.adm.SetPolicy(ctx, "", userDNWithUnicodeDot, false); err != nil {
+		c.Fatalf("Unable to remove policy setting: %v", err)
+	}
+
+	_, err = ldapID.Retrieve()
+	if err == nil {
+		c.Fatalf("Expected to fail to create a user with no associated policy!")
+	}
+
+	// Set policy via group and validate policy assignment.
+	actualGroupDN := mustNormalizeDN("cn=project.c,ou=groups,ou=swengg,dc=min,dc=io")
+	groupDNWithUnicodeDot := "cn=project﹒c,ou=groups,ou=swengg,dc=min,dc=io"
+	if err = s.adm.SetPolicy(ctx, policy, groupDNWithUnicodeDot, true); err != nil {
+		c.Fatalf("Unable to attach group policy: %v", err)
+	}
+
+	value, err = ldapID.Retrieve()
+	if err != nil {
+		c.Fatalf("Expected to generate STS creds, got err: %#v", err)
+	}
+
+	policyResult, err := s.adm.GetLDAPPolicyEntities(ctx, madmin.PolicyEntitiesQuery{
+		Policy: []string{policy},
+	})
+	if err != nil {
+		c.Fatalf("GetLDAPPolicyEntities should not fail: %v", err)
+	}
+	{
+		// Check that the mapping we created exists.
+		idx := slices.IndexFunc(policyResult.PolicyMappings, func(e madmin.PolicyEntities) bool {
+			return e.Policy == policy && slices.Contains(e.Groups, actualGroupDN)
+		})
+		if !(idx >= 0) {
+			c.Fatalf("expected groupDN (%s) to be present in mapping list: %#v", actualGroupDN, policyResult)
+		}
 	}
 
 	minioClient, err = minio.New(s.endpoint, &minio.Options{

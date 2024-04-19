@@ -62,11 +62,12 @@ var (
 	globalHealConfig heal.Config
 
 	// Sleeper values are updated when config is loaded.
-	scannerSleeper              = newDynamicSleeper(2, time.Second, true) // Keep defaults same as config defaults
-	scannerCycle                = uatomic.NewDuration(dataScannerStartDelay)
-	scannerIdleMode             = uatomic.NewInt32(0) // default is throttled when idle
-	scannerExcessObjectVersions = uatomic.NewInt64(100)
-	scannerExcessFolders        = uatomic.NewInt64(50000)
+	scannerSleeper                       = newDynamicSleeper(2, time.Second, true) // Keep defaults same as config defaults
+	scannerCycle                         = uatomic.NewDuration(dataScannerStartDelay)
+	scannerIdleMode                      = uatomic.NewInt32(0) // default is throttled when idle
+	scannerExcessObjectVersions          = uatomic.NewInt64(100)
+	scannerExcessObjectVersionsTotalSize = uatomic.NewInt64(1024 * 1024 * 1024 * 1024) // 1 TB
+	scannerExcessFolders                 = uatomic.NewInt64(50000)
 )
 
 // initDataScanner will start the scanner in the background.
@@ -1065,7 +1066,7 @@ func (i *scannerItem) applyVersionActions(ctx context.Context, o ObjectLayer, fi
 	}
 
 	// Check if we have many versions after applyNewerNoncurrentVersionLimit.
-	if len(objInfos) > int(scannerExcessObjectVersions.Load()) {
+	if len(objInfos) >= int(scannerExcessObjectVersions.Load()) {
 		// Notify object accessed via a GET request.
 		sendEvent(eventArgs{
 			EventName:  event.ObjectManyVersions,
@@ -1085,6 +1086,39 @@ func (i *scannerItem) applyVersionActions(ctx context.Context, o ObjectLayer, fi
 			Object:  i.objectPath(),
 			Tags: map[string]interface{}{
 				"x-minio-versions": strconv.Itoa(len(objInfos)),
+			},
+		})
+	}
+
+	cumulativeSize := int64(0)
+	for _, objInfo := range objInfos {
+		cumulativeSize += objInfo.Size
+	}
+	// Check if the cumulative size of all versions of this object is high.
+	if cumulativeSize >= scannerExcessObjectVersionsTotalSize.Load() {
+		// Notify object accessed via a GET request.
+		sendEvent(eventArgs{
+			EventName:  event.ObjectLargeVersions,
+			BucketName: i.bucket,
+			Object: ObjectInfo{
+				Name: i.objectPath(),
+			},
+			UserAgent: "Scanner",
+			Host:      globalLocalNodeName,
+			RespElements: map[string]string{
+				"x-minio-versions-count": strconv.Itoa(len(objInfos)),
+				"x-minio-versions-size":  strconv.FormatInt(cumulativeSize, 10),
+			},
+		})
+
+		auditLogInternal(context.Background(), AuditLogOptions{
+			Event:   "scanner:largeversions",
+			APIName: "Scanner",
+			Bucket:  i.bucket,
+			Object:  i.objectPath(),
+			Tags: map[string]interface{}{
+				"x-minio-versions-count": strconv.Itoa(len(objInfos)),
+				"x-minio-versions-size":  strconv.FormatInt(cumulativeSize, 10),
 			},
 		})
 	}
@@ -1388,48 +1422,7 @@ func (d *dynamicSleeper) Timer(ctx context.Context) func() {
 	t := time.Now()
 	return func() {
 		doneAt := time.Now()
-		for {
-			// Grab current values
-			d.mu.RLock()
-			minWait, maxWait := d.minSleep, d.maxSleep
-			factor := d.factor
-			cycle := d.cycle
-			d.mu.RUnlock()
-			elapsed := doneAt.Sub(t)
-			// Don't sleep for really small amount of time
-			wantSleep := time.Duration(float64(elapsed) * factor)
-			if wantSleep <= minWait {
-				return
-			}
-			if maxWait > 0 && wantSleep > maxWait {
-				wantSleep = maxWait
-			}
-			timer := time.NewTimer(wantSleep)
-			select {
-			case <-ctx.Done():
-				if !timer.Stop() {
-					<-timer.C
-				}
-				if d.isScanner {
-					globalScannerMetrics.incTime(scannerMetricYield, wantSleep)
-				}
-				return
-			case <-timer.C:
-				if d.isScanner {
-					globalScannerMetrics.incTime(scannerMetricYield, wantSleep)
-				}
-				return
-			case <-cycle:
-				if !timer.Stop() {
-					// We expired.
-					<-timer.C
-					if d.isScanner {
-						globalScannerMetrics.incTime(scannerMetricYield, wantSleep)
-					}
-					return
-				}
-			}
-		}
+		d.Sleep(ctx, doneAt.Sub(t))
 	}
 }
 
