@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/coreos/go-systemd/v22/daemon"
+	"github.com/dustin/go-humanize"
 	"github.com/minio/cli"
 	"github.com/minio/madmin-go/v3"
 	"github.com/minio/minio-go/v7"
@@ -183,6 +184,18 @@ var ServerFlags = []cli.Flag{
 		Usage:  "set global memory limit per server via GOMEMLIMIT",
 		Hidden: true,
 		EnvVar: "MINIO_MEMLIMIT",
+	},
+	cli.IntFlag{
+		Name:   "send-buf-size",
+		Value:  4 * humanize.MiByte,
+		EnvVar: "MINIO_SEND_BUF_SIZE",
+		Hidden: true,
+	},
+	cli.IntFlag{
+		Name:   "recv-buf-size",
+		Value:  4 * humanize.MiByte,
+		EnvVar: "MINIO_RECV_BUF_SIZE",
+		Hidden: true,
 	},
 }
 
@@ -368,15 +381,22 @@ func serverHandleCmdArgs(ctxt serverCtxt) {
 	// Initialize, see which NIC the service is running on, and save it as global value
 	setGlobalInternodeInterface(ctxt.Interface)
 
+	globalTCPOptions = xhttp.TCPOptions{
+		UserTimeout:        int(ctxt.UserTimeout.Milliseconds()),
+		ClientReadTimeout:  ctxt.ConnClientReadDeadline,
+		ClientWriteTimeout: ctxt.ConnClientWriteDeadline,
+		Interface:          ctxt.Interface,
+		SendBufSize:        ctxt.SendBufSize,
+		RecvBufSize:        ctxt.RecvBufSize,
+	}
+
 	// allow transport to be HTTP/1.1 for proxying.
-	globalProxyTransport = NewCustomHTTPProxyTransport()()
 	globalProxyEndpoints = GetProxyEndpoints(globalEndpoints)
 	globalInternodeTransport = NewInternodeHTTPTransport(ctxt.MaxIdleConnsPerHost)()
 	globalRemoteTargetTransport = NewRemoteTargetHTTPTransport(false)()
-	globalHealthChkTransport = NewHTTPTransport()
 	globalForwarder = handlers.NewForwarder(&handlers.Forwarder{
 		PassHost:     true,
-		RoundTripper: NewHTTPTransportWithTimeout(1 * time.Hour),
+		RoundTripper: globalRemoteTargetTransport,
 		Logger: func(err error) {
 			if err != nil && !errors.Is(err, context.Canceled) {
 				replLogIf(GlobalContext, err)
@@ -384,21 +404,11 @@ func serverHandleCmdArgs(ctxt serverCtxt) {
 		},
 	})
 
-	globalTCPOptions = xhttp.TCPOptions{
-		UserTimeout:        int(ctxt.UserTimeout.Milliseconds()),
-		ClientReadTimeout:  ctxt.ConnClientReadDeadline,
-		ClientWriteTimeout: ctxt.ConnClientWriteDeadline,
-		Interface:          ctxt.Interface,
-	}
-
 	// On macOS, if a process already listens on LOCALIPADDR:PORT, net.Listen() falls back
 	// to IPv6 address ie minio will start listening on IPv6 address whereas another
 	// (non-)minio process is listening on IPv4 of given port.
 	// To avoid this error situation we check for port availability.
 	logger.FatalIf(xhttp.CheckPortAvailability(globalMinioHost, globalMinioPort, globalTCPOptions), "Unable to start the server")
-
-	globalConnReadDeadline = ctxt.ConnReadDeadline
-	globalConnWriteDeadline = ctxt.ConnWriteDeadline
 }
 
 func initAllSubsystems(ctx context.Context) {
@@ -1030,7 +1040,7 @@ func serverMain(ctx *cli.Context) {
 		globalMinioClient, err = minio.New(globalLocalNodeName, &minio.Options{
 			Creds:     credentials.NewStaticV4(globalActiveCred.AccessKey, globalActiveCred.SecretKey, ""),
 			Secure:    globalIsTLS,
-			Transport: globalProxyTransport,
+			Transport: globalRemoteTargetTransport,
 			Region:    region,
 		})
 		logger.FatalIf(err, "Unable to initialize MinIO client")
