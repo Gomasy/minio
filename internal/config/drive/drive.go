@@ -33,35 +33,30 @@ var DefaultKVS = config.KVS{
 	},
 }
 
-var configLk sync.RWMutex
-
 // Config represents the subnet related configuration
 type Config struct {
 	// MaxTimeout - maximum timeout for a drive operation
 	MaxTimeout time.Duration `json:"maxTimeout"`
+	mutex      sync.RWMutex
 }
 
 // Update - updates the config with latest values
-func (c *Config) Update(new Config) error {
-	configLk.Lock()
-	defer configLk.Unlock()
+func (c *Config) Update(new *Config) error {
+	c.mutex.Lock()
+	defer c.mutex.Unlock()
 	c.MaxTimeout = getMaxTimeout(new.MaxTimeout)
 	return nil
 }
 
 // GetMaxTimeout - returns the max timeout value.
 func (c *Config) GetMaxTimeout() time.Duration {
-	configLk.RLock()
-	defer configLk.RUnlock()
-
+	c.mutex.RLock()
+	defer c.mutex.RUnlock()
 	return getMaxTimeout(c.MaxTimeout)
 }
 
 // LookupConfig - lookup config and override with valid environment settings if any.
-func LookupConfig(kvs config.KVS) (cfg Config, err error) {
-	cfg = Config{
-		MaxTimeout: 30 * time.Second,
-	}
+func LookupConfig(kvs config.KVS) (cfg *Config, err error) {
 	if err = config.CheckValidKeys(config.DriveSubSys, kvs, DefaultKVS); err != nil {
 		return cfg, err
 	}
@@ -73,7 +68,9 @@ func LookupConfig(kvs config.KVS) (cfg Config, err error) {
 			d = env.Get("_MINIO_DISK_MAX_TIMEOUT", "")
 		}
 	}
-
+	cfg = &Config{
+		mutex: sync.RWMutex{},
+	}
 	dur, _ := time.ParseDuration(d)
 	if dur < time.Second {
 		cfg.MaxTimeout = 30 * time.Second

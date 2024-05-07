@@ -566,7 +566,6 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 		return errServerNotInitialized
 	}
 
-	var errs []error
 	setDriveCounts := objAPI.SetDriveCounts()
 	switch subSys {
 	case config.APISubSys:
@@ -589,29 +588,26 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 	case config.HealSubSys:
 		healCfg, err := heal.LookupConfig(s[config.HealSubSys][config.Default])
 		if err != nil {
-			errs = append(errs, fmt.Errorf("Unable to apply heal config: %w", err))
-		} else {
-			globalHealConfig.Update(healCfg)
+			return fmt.Errorf("Unable to apply heal config: %w", err)
 		}
+		globalHealConfig.Update(healCfg)
 	case config.BatchSubSys:
 		batchCfg, err := batch.LookupConfig(s[config.BatchSubSys][config.Default])
 		if err != nil {
-			errs = append(errs, fmt.Errorf("Unable to apply batch config: %w", err))
-		} else {
-			globalBatchConfig.Update(batchCfg)
+			return fmt.Errorf("Unable to apply batch config: %w", err)
 		}
+		globalBatchConfig.Update(batchCfg)
 	case config.ScannerSubSys:
 		scannerCfg, err := scanner.LookupConfig(s[config.ScannerSubSys][config.Default])
 		if err != nil {
-			errs = append(errs, fmt.Errorf("Unable to apply scanner config: %w", err))
-		} else {
-			// update dynamic scanner values.
-			scannerIdleMode.Store(scannerCfg.IdleMode)
-			scannerCycle.Store(scannerCfg.Cycle)
-			scannerExcessObjectVersions.Store(scannerCfg.ExcessVersions)
-			scannerExcessFolders.Store(scannerCfg.ExcessFolders)
-			configLogIf(ctx, scannerSleeper.Update(scannerCfg.Delay, scannerCfg.MaxWait))
+			return fmt.Errorf("Unable to apply scanner config: %w", err)
 		}
+		// update dynamic scanner values.
+		scannerIdleMode.Store(scannerCfg.IdleMode)
+		scannerCycle.Store(scannerCfg.Cycle)
+		scannerExcessObjectVersions.Store(scannerCfg.ExcessVersions)
+		scannerExcessFolders.Store(scannerCfg.ExcessFolders)
+		configLogIf(ctx, scannerSleeper.Update(scannerCfg.Delay, scannerCfg.MaxWait))
 	case config.LoggerWebhookSubSys:
 		loggerCfg, err := logger.LookupConfigForSubSys(ctx, s, config.LoggerWebhookSubSys)
 		if err != nil {
@@ -695,11 +691,11 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 			}
 		}
 	case config.DriveSubSys:
-		driveConfig, err := drive.LookupConfig(s[config.DriveSubSys][config.Default])
-		if err != nil {
+		if driveConfig, err := drive.LookupConfig(s[config.DriveSubSys][config.Default]); err != nil {
 			configLogIf(ctx, fmt.Errorf("Unable to load drive config: %w", err))
 		} else {
-			if err = globalDriveConfig.Update(driveConfig); err != nil {
+			err := globalDriveConfig.Update(driveConfig)
+			if err != nil {
 				configLogIf(ctx, fmt.Errorf("Unable to update drive config: %v", err))
 			}
 		}
@@ -713,31 +709,26 @@ func applyDynamicConfigForSubSys(ctx context.Context, objAPI ObjectLayer, s conf
 	case config.BrowserSubSys:
 		browserCfg, err := browser.LookupConfig(s[config.BrowserSubSys][config.Default])
 		if err != nil {
-			errs = append(errs, fmt.Errorf("Unable to apply browser config: %w", err))
-		} else {
-			globalBrowserConfig.Update(browserCfg)
+			return fmt.Errorf("Unable to apply browser config: %w", err)
 		}
+		globalBrowserConfig.Update(browserCfg)
 	case config.ILMSubSys:
 		ilmCfg, err := ilm.LookupConfig(s[config.ILMSubSys][config.Default])
 		if err != nil {
-			errs = append(errs, fmt.Errorf("Unable to apply ilm config: %w", err))
-		} else {
-			if globalTransitionState != nil {
-				globalTransitionState.UpdateWorkers(ilmCfg.TransitionWorkers)
-			}
-			if globalExpiryState != nil {
-				globalExpiryState.ResizeWorkers(ilmCfg.ExpirationWorkers)
-			}
-			globalILMConfig.update(ilmCfg)
+			return fmt.Errorf("Unable to apply ilm config: %w", err)
 		}
+		if globalTransitionState != nil {
+			globalTransitionState.UpdateWorkers(ilmCfg.TransitionWorkers)
+		}
+		if globalExpiryState != nil {
+			globalExpiryState.ResizeWorkers(ilmCfg.ExpirationWorkers)
+		}
+		globalILMConfig.update(ilmCfg)
 	}
 	globalServerConfigMu.Lock()
 	defer globalServerConfigMu.Unlock()
 	if globalServerConfig != nil {
 		globalServerConfig[subSys] = s[subSys]
-	}
-	if len(errs) > 0 {
-		return errors.Join(errs...)
 	}
 	return nil
 }
