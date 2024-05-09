@@ -251,6 +251,18 @@ func (er erasureObjects) GetObjectNInfo(ctx context.Context, bucket, object stri
 		opts.NoDecryption = true
 	}
 
+	if objInfo.Size == 0 {
+		if _, _, err := rs.GetOffsetLength(objInfo.Size); err != nil {
+			// Make sure to return object info to provide extra information.
+			return &GetObjectReader{
+				ObjInfo: objInfo,
+			}, err
+		}
+
+		// Zero byte objects don't even need to further initialize pipes etc.
+		return NewGetObjectReaderFromReader(bytes.NewReader(nil), objInfo, opts)
+	}
+
 	if objInfo.IsRemote() {
 		gr, err := getTransitionedObjectReader(ctx, bucket, object, rs, h, objInfo, opts)
 		if err != nil {
@@ -258,11 +270,6 @@ func (er erasureObjects) GetObjectNInfo(ctx context.Context, bucket, object stri
 		}
 		unlockOnDefer = false
 		return gr.WithCleanupFuncs(nsUnlocker), nil
-	}
-
-	if objInfo.Size == 0 {
-		// Zero byte objects don't even need to further initialize pipes etc.
-		return NewGetObjectReaderFromReader(bytes.NewReader(nil), objInfo, opts)
 	}
 
 	fn, off, length, err := NewGetObjectReader(rs, objInfo, opts)
@@ -1801,6 +1808,14 @@ func (er erasureObjects) commitRenameDataDir(ctx context.Context, bucket, object
 
 func (er erasureObjects) deletePrefix(ctx context.Context, bucket, prefix string) error {
 	disks := er.getDisks()
+	// Assume (N/2 + 1) quorum for Delete()
+	// this is a theoretical assumption such that
+	// for delete's we do not need to honor storage
+	// class for objects that have reduced quorum
+	// due to storage class - this only needs to be honored
+	// for Read() requests alone that we already do.
+	writeQuorum := len(disks)/2 + 1
+
 	g := errgroup.WithNErrs(len(disks))
 	for index := range disks {
 		index := index
@@ -1814,12 +1829,9 @@ func (er erasureObjects) deletePrefix(ctx context.Context, bucket, prefix string
 			})
 		}, index)
 	}
-	for _, err := range g.Wait() {
-		if err != nil {
-			return err
-		}
-	}
-	return nil
+
+	// return errors if any during deletion
+	return reduceWriteQuorumErrs(ctx, g.Wait(), objectOpIgnoredErrs, writeQuorum)
 }
 
 // DeleteObject - deletes an object, this call doesn't necessary reply

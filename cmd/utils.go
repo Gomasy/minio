@@ -1123,16 +1123,18 @@ func ptr[T any](a T) *T {
 	return &a
 }
 
-func max(a, b int) int {
-	if a > b {
-		return a
+// sleepContext sleeps for d duration or until ctx is done.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(d):
 	}
-	return b
+	return nil
 }
 
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
+// helper type to return either item or error.
+type itemOrErr[V any] struct {
+	Item V
+	Err  error
 }
