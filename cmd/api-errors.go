@@ -1478,7 +1478,7 @@ var errorCodes = errorCodeMap{
 	ErrTooManyRequests: {
 		Code:           "TooManyRequests",
 		Description:    "Deadline exceeded while waiting in incoming queue, please reduce your request rate",
-		HTTPStatusCode: http.StatusServiceUnavailable,
+		HTTPStatusCode: http.StatusTooManyRequests,
 	},
 	ErrUnsupportedMetadata: {
 		Code:           "InvalidArgument",
@@ -2430,9 +2430,9 @@ func toAPIError(ctx context.Context, err error) APIError {
 		switch e := err.(type) {
 		case kms.Error:
 			apiErr = APIError{
-				Description:    e.Err.Error(),
 				Code:           e.APICode,
-				HTTPStatusCode: e.HTTPStatusCode,
+				Description:    e.Err,
+				HTTPStatusCode: e.Code,
 			}
 		case batchReplicationJobError:
 			apiErr = APIError{
