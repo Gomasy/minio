@@ -64,7 +64,7 @@ import (
 	"github.com/minio/minio/internal/logger"
 	"github.com/minio/minio/internal/s3select"
 	"github.com/minio/mux"
-	"github.com/minio/pkg/v2/policy"
+	"github.com/minio/pkg/v3/policy"
 	"github.com/valyala/bytebufferpool"
 )
 
@@ -476,6 +476,15 @@ func (api objectAPIHandlers) getObjectHandler(ctx context.Context, objectAPI Obj
 			return true
 		}
 
+		if oi.UserTags != "" {
+			r.Header.Set(xhttp.AmzObjectTagging, oi.UserTags)
+		}
+
+		if s3Error := authorizeRequest(ctx, r, policy.GetObjectAction); s3Error != ErrNone {
+			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
+			return true
+		}
+
 		return checkPreconditions(ctx, w, r, oi, opts)
 	}
 
@@ -546,15 +555,6 @@ func (api objectAPIHandlers) getObjectHandler(ctx context.Context, objectAPI Obj
 	defer gr.Close()
 
 	objInfo := gr.ObjInfo
-
-	if objInfo.UserTags != "" {
-		r.Header.Set(xhttp.AmzObjectTagging, objInfo.UserTags)
-	}
-
-	if s3Error := authorizeRequest(ctx, r, policy.GetObjectAction); s3Error != ErrNone {
-		writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Error), r.URL)
-		return
-	}
 
 	if !proxy.Proxy { // apply lifecycle rules only for local requests
 		// Automatically remove the object/version if an expiry lifecycle rule can be applied
@@ -647,7 +647,7 @@ func (api objectAPIHandlers) getObjectHandler(ctx context.Context, objectAPI Obj
 		}()
 	}
 
-	if err = setObjectHeaders(w, objInfo, rs, opts); err != nil {
+	if err = setObjectHeaders(ctx, w, objInfo, rs, opts); err != nil {
 		writeErrorResponse(ctx, w, toAPIError(ctx, err), r.URL)
 		return
 	}
@@ -786,7 +786,7 @@ func (api objectAPIHandlers) getObjectAttributesHandler(ctx context.Context, obj
 	}
 
 	if _, ok := opts.ObjectAttributes[xhttp.StorageClass]; ok {
-		OA.StorageClass = objInfo.StorageClass
+		OA.StorageClass = filterStorageClass(ctx, objInfo.StorageClass)
 	}
 
 	objInfo.decryptPartsChecksums()
@@ -1173,7 +1173,7 @@ func (api objectAPIHandlers) headObjectHandler(ctx context.Context, objectAPI Ob
 	}
 
 	// Set standard object headers.
-	if err = setObjectHeaders(w, objInfo, rs, opts); err != nil {
+	if err = setObjectHeaders(ctx, w, objInfo, rs, opts); err != nil {
 		writeErrorResponseHeadersOnly(w, toAPIError(ctx, err))
 		return
 	}
@@ -1328,7 +1328,7 @@ func getRemoteInstanceTransport() http.RoundTripper {
 // Returns a minio-go Client configured to access remote host described by destDNSRecord
 // Applicable only in a federated deployment
 var getRemoteInstanceClient = func(r *http.Request, host string) (*miniogo.Core, error) {
-	cred := getReqAccessCred(r, globalSite.Region)
+	cred := getReqAccessCred(r, globalSite.Region())
 	// In a federated deployment, all the instances share config files
 	// and hence expected to have same credentials.
 	core, err := miniogo.NewCore(host, &miniogo.Options{
@@ -2103,7 +2103,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 		}
 
 	case authTypePresigned, authTypeSigned:
-		if s3Err = reqSignatureV4Verify(r, globalSite.Region, serviceS3); s3Err != ErrNone {
+		if s3Err = reqSignatureV4Verify(r, globalSite.Region(), serviceS3); s3Err != ErrNone {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 			return
 		}
@@ -2521,7 +2521,7 @@ func (api objectAPIHandlers) PutObjectExtractHandler(w http.ResponseWriter, r *h
 		}
 
 	case authTypePresigned, authTypeSigned:
-		if s3Err = reqSignatureV4Verify(r, globalSite.Region, serviceS3); s3Err != ErrNone {
+		if s3Err = reqSignatureV4Verify(r, globalSite.Region(), serviceS3); s3Err != ErrNone {
 			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(s3Err), r.URL)
 			return
 		}
